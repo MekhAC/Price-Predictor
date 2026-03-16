@@ -1,0 +1,12 @@
+# Data folder in project root
+/data/
+
+# Virtual environment
+rottoenv/
+
+# Python cache
+__pycache__/
+**/__pycache__/
+
+# Joblib model files
+*.joblib

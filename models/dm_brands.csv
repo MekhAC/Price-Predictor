@@ -1,0 +1,35 @@
+type,scope,name,parent,min,max,multiplier,notes
+brand,,Ashok Leyland,,, ,0.35,Mainly CVs; low passenger-car resale
+brand,,Audi,,, ,0.65,Luxury; higher depreciation; metro-centric demand
+brand,,BMW,,, ,0.70,Sporty luxury; used demand decent in metros
+brand,,BYD,,, ,0.65,EV specialist; growing but infra-dependent
+brand,,Citroen,,, ,0.55,Newer network; select models gaining slowly
+brand,,Chevrolet (discontinued),,, ,0.40,Discontinued; weak parts/resale
+brand,,Datsun (discontinued),,, ,0.35,Budget brand discontinued; low demand
+brand,,Fiat (discontinued),,, ,0.40,Discontinued; parts via Jeep network
+brand,,Force Motors,,, ,0.35,Niche (Gurkha); limited buyer base
+brand,,Ford (discontinued),,, ,0.65,Strong owner affinity; service via partners
+brand,,Honda,,, ,0.75,Sedans strong (City); brand trust moderate
+brand,,Hyundai,,, ,0.90,High liquidity across segments
+brand,,ISUZU,,, ,0.50,Niche pickups (V-Cross); limited mass demand
+brand,,Jaguar,,, ,0.55,Luxury; depreciation + higher upkeep
+brand,,Jeep,,, ,0.60,Brand pull but mixed ownership costs
+brand,,Kia,,, ,0.85,High demand (Seltos/Sonet); strong network
+brand,,Land Rover,,, ,0.65,Premium SUVs; high upkeep; metro demand
+brand,,MG,,, ,0.60,Feature-led; resale still stabilizing
+brand,,Mahindra,,, ,0.85,SUV strength; rural + urban pull
+brand,,Maruti Suzuki,,, ,0.90,Top resale/liquidity; cheapest to own
+brand,,Maserati,,, ,0.45,Ultra-niche; very thin used demand
+brand,,Mercedes-Benz,,, ,0.70,Luxury; wide lineup; depreciation higher
+brand,,Mini,,, ,0.60,Style niche; limited but steady demand
+brand,,Mitsubishi (discontinued),,, ,0.35,Discontinued; scarce inventory/support
+brand,,Nissan,,, ,0.50,Limited lineup; Magnite helps somewhat
+brand,,Porsche,,, ,0.75,Strong enthusiast demand; very niche supply
+brand,,Premier (discontinued),,, ,0.20,Legacy/collector niche only
+brand,,Renault,,, ,0.55,Budget crossovers/MPVs; moderate pull
+brand,,Skoda,,, ,0.70,Driver’s cars; improving but resale varies
+brand,,SsangYong (discontinued),,, ,0.30,Discontinued; very thin demand
+brand,,Tata,,, ,0.80,Improving quality; Nexon/Punch strong
+brand,,Toyota,,, ,0.95,Best resale/trust; MPV/SUV dominance
+brand,,Volkswagen,,, ,0.80,Driver appeal; Polo/Vento/virtus markets
+brand,,Volvo,,, ,0.65,Safe luxury; moderate resale; metro-centric
