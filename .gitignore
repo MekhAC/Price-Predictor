@@ -11,14 +11,10 @@ __pycache__/
 # Joblib model files
 *.joblib
  
-# Ignore models directory
-/models/
 
 # Prediction input/output files directory
 /predictions/
 
-#ignore scripts directory
-/scripts/
 
 # Common Python virtual environments
 venv/
