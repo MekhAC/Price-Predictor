@@ -4,4 +4,6 @@ scikit-learn
 scipy
 openpyxl
 joblib
-yaml
+PyYAML
+lightgbm
+streamlit

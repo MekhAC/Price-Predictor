@@ -10,3 +10,45 @@ __pycache__/
 
 # Joblib model files
 *.joblib
+ 
+# Ignore models directory
+/models/
+
+# Prediction input/output files directory
+/predictions/
+
+#ignore scripts directory
+/scripts/
+
+# Common Python virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python build and test artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Notebook and editor artifacts
+.ipynb_checkpoints/
+.vscode/
+
+# OS and runtime logs
+Thumbs.db
+.DS_Store
+*.log
+
+# Local environment/secrets
+.env
+.env.*
+
+# Streamlit local secrets
+.streamlit/secrets.toml

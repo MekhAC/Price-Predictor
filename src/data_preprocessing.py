@@ -4,10 +4,6 @@ import numpy as np
 import pandas as pd
 import joblib
 from datetime import datetime
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
 
 # ── PATHS ──────────────────────────────────────────────────────────────────────
 BASE_DIR   = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -16,6 +12,10 @@ MODELS_DIR = os.path.join(BASE_DIR, 'models')
 os.makedirs(MODELS_DIR, exist_ok=True)
 
 CURRENT_YEAR = 2025
+PREPROCESSOR_VERSION = 4
+NUMERIC_FEATURES = ['Year','KMs Driven','Car Age','KMs/Year','Ownership']
+CATEGORICAL_FEATURES = ['City','Make','Model','Variant','Transmission','Fuel','BodyType','Reg State']
+OTHER_CATEGORY = '__OTHER__'
 
 # ── COLUMN NORMALIZATION ───────────────────────────────────────────────────────
 # map many possible header spellings to a single canonical name
@@ -125,15 +125,18 @@ def load_and_clean(path):
                        .astype(float)
     )
 
-    # Timestamps if present
+    # Timestamps if present; use row-level snapshot year for age derivation.
     if 'Fetched On' in df.columns:
         df['Fetched On'] = pd.to_datetime(df['Fetched On'], errors='coerce')
+        snapshot_year = df['Fetched On'].dt.year.fillna(CURRENT_YEAR).astype(float)
+    else:
+        snapshot_year = pd.Series(float(CURRENT_YEAR), index=df.index)
 
     # Registration → state
     df['Reg State'] = df['Registration'].apply(_reg_state) if 'Registration' in df else 'UNK'
 
     # Derivations
-    df['Car Age'] = (CURRENT_YEAR - df['Year']).clip(lower=0)
+    df['Car Age'] = (snapshot_year - df['Year']).clip(lower=0)
     df['KMs/Year'] = np.where(df['Car Age'] > 0, df['KMs Driven'] / df['Car Age'], df['KMs Driven'])
 
     # Minimal normalizations
@@ -151,7 +154,7 @@ def load_and_clean(path):
 
     # Filter sanity
     df = df.dropna(subset=['Price (₹)', 'Year', 'KMs Driven'])
-    df = df[(df['Year'] >= 2005) & (df['Year'] <= CURRENT_YEAR)]
+    df = df[(df['Year'] >= 2005) & (df['Year'] <= snapshot_year)]
     df = df[(df['KMs Driven'] >= 0) & (df['KMs Driven'] <= 400_000)]
 
     lo, hi = df['Price (₹)'].quantile([0.01, 0.99])
@@ -162,30 +165,69 @@ def load_and_clean(path):
 
     return df.reset_index(drop=True)
 
+
+def prepare_model_input(df: pd.DataFrame, meta: dict) -> pd.DataFrame:
+    numeric_feats = meta['numeric_feats']
+    categorical_feats = meta['categorical_feats']
+    numeric_fill_values = meta['numeric_fill_values']
+    categorical_levels = meta['categorical_levels']
+
+    X = df.copy()
+
+    for col in numeric_feats:
+        if col not in X.columns:
+            X[col] = np.nan
+        X[col] = pd.to_numeric(X[col], errors='coerce').fillna(numeric_fill_values[col]).astype(float)
+
+    for col in categorical_feats:
+        levels = categorical_levels[col]
+        allowed = set(levels)
+        if col not in X.columns:
+            X[col] = OTHER_CATEGORY
+        X[col] = X[col].fillna(OTHER_CATEGORY).astype(str).str.strip()
+        X[col] = X[col].where(X[col].isin(allowed), OTHER_CATEGORY)
+        X[col] = pd.Categorical(X[col], categories=levels)
+
+    return X[numeric_feats + categorical_feats]
+
+
+def is_native_lightgbm_preprocessor(meta: dict) -> bool:
+    return (
+        meta.get('preprocessor_type') == 'lightgbm_native'
+        and int(meta.get('preprocessor_version', 0)) >= PREPROCESSOR_VERSION
+    )
+
 # ── PREPROCESSOR ───────────────────────────────────────────────────────────────
 def build_preprocessor(df):
-    numeric_feats = ['Year','KMs Driven','Car Age','KMs/Year','Ownership']
-    categorical_feats = ['City','Make','Model','Variant','Transmission','Fuel','BodyType','Reg State']
+    numeric_feats = NUMERIC_FEATURES
+    categorical_feats = CATEGORICAL_FEATURES
 
-    num_pipe = Pipeline([('impute', SimpleImputer(strategy='median'))])
-    cat_pipe = Pipeline([
-        ('impute', SimpleImputer(strategy='most_frequent')),
-        ('ohe', OneHotEncoder(handle_unknown='ignore')),
-    ])
+    numeric_fill_values = {
+        col: float(pd.to_numeric(df[col], errors='coerce').median())
+        for col in numeric_feats
+    }
+    categorical_levels = {}
+    for col in categorical_feats:
+        values = (
+            df[col].fillna(OTHER_CATEGORY).astype(str).str.strip().replace({'': OTHER_CATEGORY})
+        )
+        levels = sorted(v for v in values.unique().tolist() if v != OTHER_CATEGORY)
+        levels.append(OTHER_CATEGORY)
+        categorical_levels[col] = levels
 
-    pre = ColumnTransformer([
-        ('num', num_pipe, numeric_feats),
-        ('cat', cat_pipe, categorical_feats),
-    ])
-
-    pre.fit(df[numeric_feats + categorical_feats])
+    meta = {
+        'preprocessor_type': 'lightgbm_native',
+        'preprocessor_version': PREPROCESSOR_VERSION,
+        'numeric_feats': numeric_feats,
+        'categorical_feats': categorical_feats,
+        'numeric_fill_values': numeric_fill_values,
+        'categorical_levels': categorical_levels,
+    }
 
     out_path = os.path.join(MODELS_DIR, 'preprocessor.joblib')
-    joblib.dump({'preprocessor': pre,
-                 'numeric_feats': numeric_feats,
-                 'categorical_feats': categorical_feats}, out_path)
+    joblib.dump(meta, out_path)
     print(f"✅ Preprocessor saved to {out_path}")
-    return pre
+    return meta
 
 # ── SCRIPT ENTRYPOINT ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
