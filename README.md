@@ -10,13 +10,13 @@ This project now includes a Streamlit UI for:
 From the project root:
 
 ```powershell
-c:/Users/apoor/OneDrive/Desktop/Web/pricePredictor/venv/Scripts/python.exe -m streamlit run src/ui_app.py
+python.exe -m streamlit run src/ui_app.py
 ```
 
 If needed, install dependencies first:
 
 ```powershell
-c:/Users/apoor/OneDrive/Desktop/Web/pricePredictor/venv/Scripts/python.exe -m pip install -r requirements.txt
+python.exe -m pip install -r requirements.txt
 ```
 
 ## What the UI does
