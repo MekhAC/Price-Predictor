@@ -11,10 +11,13 @@ DATA_DIR   = os.path.join(BASE_DIR, 'data')
 MODELS_DIR = os.path.join(BASE_DIR, 'models')
 os.makedirs(MODELS_DIR, exist_ok=True)
 
-CURRENT_YEAR = 2025
-PREPROCESSOR_VERSION = 4
-NUMERIC_FEATURES = ['Year','KMs Driven','Car Age','KMs/Year','Ownership']
-CATEGORICAL_FEATURES = ['City','Make','Model','Variant','Transmission','Fuel','BodyType','Reg State']
+CURRENT_YEAR = datetime.now().year
+MARKET_EPOCH = datetime(2020, 1, 1)
+PREPROCESSOR_VERSION = 8
+NUMERIC_FEATURES = ['Year','KMs Driven','Car Age','KMs/Year','Ownership',
+                    'Log KMs','Age x Ownership','KMs x Ownership',
+                    'Fetch Month','Market Days','Days On Market']
+CATEGORICAL_FEATURES = ['Make','Model','Variant','Transmission','Fuel','BodyType','City','Reg State']
 OTHER_CATEGORY = '__OTHER__'
 
 # ── COLUMN NORMALIZATION ───────────────────────────────────────────────────────
@@ -36,12 +39,45 @@ CANON = {
     'transmission': 'Transmission',
     'fuel': 'Fuel',
     'bodytype': 'BodyType',
+    'body type': 'BodyType',
+    'body_type': 'BodyType',
     'price (₹)': 'Price (₹)',
     'price(₹)': 'Price (₹)',
     'price': 'Price (₹)',
     'registration': 'Registration',
     'image': 'Image',
     'fetched on': 'Fetched On',
+    'date': 'Fetched On',
+}
+
+# Known multi-word makes that must not be split naively.
+_MULTI_WORD_MAKES = [
+    'MARUTI SUZUKI', 'LAND ROVER', 'ASTON MARTIN', 'ROLLS ROYCE',
+    'FORCE MOTORS', 'MINI COOPER',
+]
+
+def _split_name_to_make_model(name_series: pd.Series) -> tuple:
+    """Split a 'Name' column like 'MARUTI SUZUKI SWIFT' into (Make, Model)."""
+    makes, models = [], []
+    for raw in name_series.fillna('Unknown'):
+        val = str(raw).strip().upper()
+        matched = False
+        for prefix in _MULTI_WORD_MAKES:
+            if val.startswith(prefix):
+                makes.append(prefix.title())
+                remainder = val[len(prefix):].strip()
+                models.append(remainder.title() if remainder else 'Unknown')
+                matched = True
+                break
+        if not matched:
+            parts = val.split(None, 1)
+            makes.append(parts[0].title() if parts else 'Unknown')
+            models.append(parts[1].title() if len(parts) > 1 else 'Unknown')
+    return makes, models
+
+_TRANSMISSION_MAP = {
+    'M': 'Manual', 'm': 'Manual', 'MANUAL': 'Manual', 'manual': 'Manual',
+    'A': 'Automatic', 'a': 'Automatic', 'AUTOMATIC': 'Automatic', 'automatic': 'Automatic',
 }
 
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -91,13 +127,40 @@ def _reg_state(x):
 
 # ── CLEANING FUNCTION ──────────────────────────────────────────────────────────
 def load_and_clean(path):
-    # Support both .xlsx and .csv
+    # Auto-cache xlsx → parquet for fast reloads
     if path.lower().endswith(('.xlsx', '.xls')):
-        df = pd.read_excel(path)
+        parquet_path = path.rsplit('.', 1)[0] + '.parquet'
+        if os.path.exists(parquet_path) and os.path.getmtime(parquet_path) >= os.path.getmtime(path):
+            print(f"  ⚡ Loading cached {os.path.basename(parquet_path)}")
+            df = pd.read_parquet(parquet_path)
+        else:
+            print(f"  📖 Reading {os.path.basename(path)} (slow, will cache as parquet)…")
+            df = pd.read_excel(path)
+            df.to_parquet(parquet_path, index=False)
+            print(f"  💾 Cached → {os.path.basename(parquet_path)}")
+    elif path.lower().endswith('.parquet'):
+        df = pd.read_parquet(path)
     else:
         df = pd.read_csv(path)
 
     df = standardize_columns(df)
+
+    # Split combined Name column into Make / Model if separate columns are absent.
+    if 'Name' in df.columns and 'Make' not in df.columns:
+        makes, models = _split_name_to_make_model(df['Name'])
+        df['Make'] = makes
+        df['Model'] = models
+
+    # Map short transmission codes to full words.
+    if 'Transmission' in df.columns:
+        df['Transmission'] = df['Transmission'].astype(str).str.strip().map(_TRANSMISSION_MAP).fillna(df['Transmission'])
+
+    # Normalize BodyType casing (HATCHBACK → Hatchback, SUV stays SUV via explicit map).
+    _BT_MAP = {'HATCHBACK': 'Hatchback', 'SEDAN': 'Sedan', 'SUV': 'SUV', 'MUV': 'MUV',
+               'CROSSOVER': 'Crossover', 'COUPE': 'Coupe', 'CONVERTIBLE': 'Convertible',
+               'WAGON': 'Wagon', 'VAN': 'Van', 'PICKUP': 'Pickup'}
+    if 'BodyType' in df.columns:
+        df['BodyType'] = df['BodyType'].astype(str).str.strip().str.upper().map(_BT_MAP).fillna(df['BodyType'])
 
     # Ensure key columns exist (create empty if missing)
     for must in ['KMs Driven','Year','Ownership','Price (₹)']:
@@ -128,37 +191,62 @@ def load_and_clean(path):
     # Timestamps if present; use row-level snapshot year for age derivation.
     if 'Fetched On' in df.columns:
         df['Fetched On'] = pd.to_datetime(df['Fetched On'], errors='coerce')
-        snapshot_year = df['Fetched On'].dt.year.fillna(CURRENT_YEAR).astype(float)
+        df['_snapshot_year'] = df['Fetched On'].dt.year.fillna(CURRENT_YEAR).astype(float)
     else:
-        snapshot_year = pd.Series(float(CURRENT_YEAR), index=df.index)
+        df['_snapshot_year'] = float(CURRENT_YEAR)
 
     # Registration → state
     df['Reg State'] = df['Registration'].apply(_reg_state) if 'Registration' in df else 'UNK'
 
     # Derivations
-    df['Car Age'] = (snapshot_year - df['Year']).clip(lower=0)
+    df['Car Age'] = (df['_snapshot_year'] - df['Year']).clip(lower=0)
     df['KMs/Year'] = np.where(df['Car Age'] > 0, df['KMs Driven'] / df['Car Age'], df['KMs Driven'])
+    df['Log KMs'] = np.log1p(df['KMs Driven'])
+    df['Age x Ownership'] = df['Car Age'] * df['Ownership'].fillna(1)
+    df['KMs x Ownership'] = df['KMs Driven'] * df['Ownership'].fillna(1)
+
+    # ── Time-based features (from snapshot date) ──
+    if 'Fetched On' in df.columns and df['Fetched On'].notna().any():
+        df['Fetch Month'] = df['Fetched On'].dt.month.fillna(6).astype(float)
+        df['Market Days'] = (df['Fetched On'] - MARKET_EPOCH).dt.days.astype(float)
+        df['Market Days'] = df['Market Days'].fillna(0.0)
+        # Days On Market: how long since this listing first appeared
+        if 'ID' in df.columns:
+            first_seen = df.groupby('ID')['Fetched On'].transform('min')
+            df['Days On Market'] = (df['Fetched On'] - first_seen).dt.days.astype(float)
+            df['Days On Market'] = df['Days On Market'].fillna(0.0)
+        else:
+            df['Days On Market'] = 0.0
+    else:
+        now = datetime.now()
+        df['Fetch Month'] = float(now.month)
+        df['Market Days'] = float((now - MARKET_EPOCH).days)
+        df['Days On Market'] = 0.0
 
     # Minimal normalizations
-    for c in ['City','Make','Model','Variant','Transmission','Fuel','BodyType']:
+    for c in ['Make','Model','Variant','Transmission','Fuel','BodyType','City']:
         if c not in df: df[c] = 'Unknown'
         df[c] = df[c].fillna('Unknown').astype(str).str.strip()
 
     # Normalize body type like 'Suv' → 'SUV'
     df['BodyType'] = df['BodyType'].replace({'Suv': 'SUV', 'Muv': 'MUV'})
 
-    # Deduplicate by ID with latest snapshot
-    if 'ID' in df.columns and 'Fetched On' in df.columns:
-        df.sort_values('Fetched On', inplace=True)
-        df = df.drop_duplicates(subset=['ID'], keep='last')
+    # Remove scraper-bug rows: IDs where identity columns flip across snapshots
+    if 'ID' in df.columns:
+        for col in ['Year', 'Fuel', 'Transmission']:
+            if col in df.columns:
+                nunique = df.groupby('ID')[col].transform('nunique')
+                df = df[nunique <= 1]
 
     # Filter sanity
     df = df.dropna(subset=['Price (₹)', 'Year', 'KMs Driven'])
-    df = df[(df['Year'] >= 2005) & (df['Year'] <= snapshot_year)]
+    df = df[(df['Year'] >= 2005) & (df['Year'] <= df['_snapshot_year'])]
     df = df[(df['KMs Driven'] >= 0) & (df['KMs Driven'] <= 400_000)]
 
     lo, hi = df['Price (₹)'].quantile([0.01, 0.99])
     df = df[(df['Price (₹)'] >= lo) & (df['Price (₹)'] <= hi)]
+
+    df = df.drop(columns=['_snapshot_year'], errors='ignore')
 
     # Backward-compat: Brand = Make
     df['Brand'] = df['Make']
@@ -232,6 +320,7 @@ def build_preprocessor(df):
 # ── SCRIPT ENTRYPOINT ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     files = (
+        glob.glob(os.path.join(DATA_DIR, 'normalized_table_*.*')) +
         glob.glob(os.path.join(DATA_DIR, 'Cars24_*.*')) +
         glob.glob(os.path.join(DATA_DIR, 'Spinny_*.*'))
     )

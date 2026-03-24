@@ -1,6 +1,6 @@
 import os, glob, re, argparse
 import pandas as pd
-from data_preprocessing import standardize_columns
+from data_preprocessing import standardize_columns, _split_name_to_make_model
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
@@ -20,6 +20,11 @@ def _clean_text(x: str) -> str:
 
 def load_minimal(path: str) -> pd.DataFrame:
     df = standardize_columns(_read_any(path))
+    # Split combined Name column into Make / Model if separate columns are absent.
+    if 'Name' in df.columns and 'Make' not in df.columns:
+        makes, models = _split_name_to_make_model(df['Name'])
+        df['Make'] = makes
+        df['Model'] = models
     for c in ['Make','Model','Variant']:
         if c not in df.columns:
             df[c] = 'Unknown'
@@ -34,11 +39,12 @@ def write_csv(path: str, rows: pd.DataFrame):
 
 def main(include_unknown: bool, only: str):
     files = (
+        glob.glob(os.path.join(DATA_DIR, 'normalized_table_*.*')) +
         glob.glob(os.path.join(DATA_DIR, 'Cars24_*.*')) +
         glob.glob(os.path.join(DATA_DIR, 'Spinny_*.*'))
     )
     if not files:
-        raise RuntimeError(f"No data files found in {DATA_DIR} (need Cars24_* / Spinny_*).")
+        raise RuntimeError(f"No data files found in {DATA_DIR}.")
 
     parts = [load_minimal(p) for p in files]
     df = pd.concat(parts, ignore_index=True)

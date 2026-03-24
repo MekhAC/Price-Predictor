@@ -1,4 +1,5 @@
 import os, argparse
+import numpy as np
 import joblib
 import pandas as pd
 from datetime import datetime
@@ -16,7 +17,6 @@ def predict(args):
     cat  = meta['categorical_feats']
 
     df = pd.DataFrame([{
-        'City': args.city,
         'Make': args.make,
         'Model': args.model,
         'Variant': args.variant,
@@ -33,8 +33,18 @@ def predict(args):
     current_year = datetime.now().year
     car_age = max(current_year - int(df.at[0, 'Year']), 0)  # type: ignore[arg-type]
     kms = float(df.at[0, 'KMs Driven'])  # type: ignore[arg-type]
+    ownership = float(df.at[0, 'Ownership'] or 1)  # type: ignore[arg-type]
     df['Car Age'] = car_age
     df['KMs/Year'] = (kms / car_age) if car_age > 0 else kms
+    df['Log KMs'] = np.log1p(kms)
+    df['Age x Ownership'] = car_age * ownership
+    df['KMs x Ownership'] = kms * ownership
+
+    # Time features – use current date at inference
+    now = datetime.now()
+    df['Fetch Month'] = float(now.month)
+    df['Market Days'] = float((now - datetime(2020, 1, 1)).days)
+    df['Days On Market'] = 0.0
 
     Xp = prepare_model_input(df, meta)
 
@@ -47,7 +57,7 @@ def predict(args):
         make=df.at[0, 'Make'],
         model=df.at[0, 'Model'],
         variant=df.at[0, 'Variant'],
-        city=df.at[0, 'City'],
+        city=getattr(args, 'city', None) or 'Unknown',
         bodytype=df.at[0, 'BodyType'],
         fuel=df.at[0, 'Fuel'],
         transmission=df.at[0, 'Transmission'],
@@ -70,7 +80,7 @@ def predict(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument('--city',        required=True)
+    p.add_argument('--city',        default='Unknown', help='City (optional)')
     p.add_argument('--make',        required=True)
     p.add_argument('--model',       required=True)
     p.add_argument('--variant',     required=True)

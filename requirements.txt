@@ -6,4 +6,7 @@ openpyxl
 joblib
 PyYAML
 lightgbm
+xgboost
+catboost
+optuna
 streamlit

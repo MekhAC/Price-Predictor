@@ -49,7 +49,6 @@ def _resolve_reg_state(reg_state: str, registration: str) -> str:
 
 
 def _single_predict(
-    city: str,
     make: str,
     model_name: str,
     variant: str,
@@ -61,6 +60,7 @@ def _single_predict(
     kms_driven: float,
     registration: str,
     reg_state: str,
+    city: str = 'Unknown',
 ):
     meta, model, adjuster = _load_artifacts()
 
@@ -71,7 +71,6 @@ def _single_predict(
 
     row = pd.DataFrame([
         {
-            'City': city,
             'Make': make,
             'Model': model_name,
             'Variant': variant,
@@ -84,6 +83,12 @@ def _single_predict(
             'Reg State': resolved_state,
             'Car Age': float(car_age),
             'KMs/Year': float(kms_per_year),
+            'Log KMs': float(np.log1p(kms_driven)),
+            'Age x Ownership': float(car_age * ownership),
+            'KMs x Ownership': float(kms_driven * ownership),
+            'Fetch Month': float(datetime.now().month),
+            'Market Days': float((datetime.now() - datetime(2020, 1, 1)).days),
+            'Days On Market': 0.0,
         }
     ])
 
@@ -93,7 +98,7 @@ def _single_predict(
     make_value = str(row.at[0, 'Make'])
     model_value = str(row.at[0, 'Model'])
     variant_value = str(row.at[0, 'Variant'])
-    city_value = str(row.at[0, 'City'])
+    city_value = city
     bodytype_value = str(row.at[0, 'BodyType'])
     fuel_value = str(row.at[0, 'Fuel'])
     transmission_value = str(row.at[0, 'Transmission'])
@@ -435,16 +440,25 @@ single_tab, batch_tab = st.tabs(['Single Prediction', 'Batch Prediction'])
 with single_tab:
     st.subheader('Predict One Car')
 
+    # Load category options from the trained preprocessor so dropdowns are data-driven.
+    _meta, _, _ = _load_artifacts()
+    _cat_levels = _meta['categorical_levels']
+
+    def _opts(col, exclude_other=True):
+        vals = _cat_levels.get(col, [])
+        if exclude_other:
+            vals = [v for v in vals if v != '__OTHER__']
+        return vals
+
     c1, c2, c3 = st.columns(3)
     with c1:
-        city = st.text_input('City', value='Bangalore')
-        make = st.text_input('Make', value='Maruti')
-        model_name = st.text_input('Model', value='Swift')
-        variant = st.text_input('Variant', value='VXI')
+        make = str(st.selectbox('Make', options=_opts('Make')))
+        model_name = str(st.selectbox('Model', options=_opts('Model')))
+        variant = str(st.selectbox('Variant', options=_opts('Variant')))
     with c2:
-        transmission = st.selectbox('Transmission', options=['Manual', 'Automatic'])
-        fuel = st.text_input('Fuel', value='Petrol')
-        bodytype = st.text_input('BodyType', value='Hatchback')
+        transmission = str(st.selectbox('Transmission', options=_opts('Transmission')))
+        fuel = str(st.selectbox('Fuel', options=_opts('Fuel')))
+        bodytype = str(st.selectbox('BodyType', options=_opts('BodyType')))
         year = st.number_input('Year', min_value=1995, max_value=datetime.now().year, value=2018, step=1)
     with c3:
         ownership = st.number_input('Ownership', min_value=1.0, max_value=10.0, value=1.0, step=1.0)
@@ -455,7 +469,6 @@ with single_tab:
     if st.button('Predict Price', type='primary'):
         try:
             result = _single_predict(
-                city=city,
                 make=make,
                 model_name=model_name,
                 variant=variant,
@@ -481,7 +494,7 @@ with single_tab:
             breakdown_df = pd.DataFrame(
                 result['breakdown'], columns=['Component', 'Multiplier', 'Weight']
             )
-            st.dataframe(breakdown_df, use_container_width=True)
+            st.dataframe(breakdown_df, width='stretch')
         except Exception as e:
             st.error(f'Single prediction failed: {e}')
 
@@ -501,7 +514,7 @@ with batch_tab:
                 metrics_df = _extract_batch_metrics(logs)
                 if not metrics_df.empty:
                     st.subheader('Batch Metrics')
-                    st.dataframe(metrics_df, use_container_width=True)
+                    st.dataframe(metrics_df, width='stretch')
 
                 sections = _extract_log_sections(logs)
                 segment_sections = [
@@ -517,7 +530,7 @@ with batch_tab:
                         st.markdown(f"**{section['title']}**")
                         section_df = _parse_segment_section_to_df(section['title'], section['body'])
                         if not section_df.empty:
-                            st.dataframe(section_df, use_container_width=True)
+                            st.dataframe(section_df, width='stretch')
                         else:
                             st.text(section['body'])
                 else:
@@ -527,10 +540,10 @@ with batch_tab:
                         st.caption('Derived from output rows because segment log parsing returned no sections.')
                         for item in fallback_tables:
                             st.markdown(f"**{item['title']}**")
-                            st.dataframe(item['df'], use_container_width=True)
+                            st.dataframe(item['df'], width='stretch')
 
                 st.subheader('Batch Output Rows')
-                st.dataframe(output_df, use_container_width=True)
+                st.dataframe(output_df, width='stretch')
 
                 st.download_button(
                     label='Download Predicted File',

@@ -8,7 +8,7 @@ from datetime import datetime
 from sklearn.metrics import mean_squared_error, r2_score
 
 from demand_adjuster import DemandAdjuster
-from data_preprocessing import prepare_model_input, is_native_lightgbm_preprocessor, standardize_columns
+from data_preprocessing import prepare_model_input, is_native_lightgbm_preprocessor, standardize_columns, _split_name_to_make_model, _TRANSMISSION_MAP
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 MODELS_DIR = os.path.join(BASE_DIR, 'models')
@@ -69,6 +69,57 @@ def _parse_ownership(x) -> float:
             return v
     m = ''.join(ch for ch in s if ch.isdigit())
     return float(m) if m else 1.0
+
+
+def _parse_number_no_regex(x) -> float:
+    """Parse numeric-looking values without regex (e.g. 89,489 km, 2,017, 78.4k)."""
+    if pd.isna(x):
+        return np.nan
+
+    if isinstance(x, (int, float, np.number)):
+        return float(x)
+
+    s = str(x).strip().lower()
+    if not s:
+        return np.nan
+
+    # Keep alnum/dot/minus/space, strip common separators/symbols.
+    filtered = ''.join(ch if (ch.isalnum() or ch in '.- ') else ' ' for ch in s)
+    filtered = filtered.replace(',', '')
+
+    for token in filtered.split():
+        if token in {'km', 'kms', 'owner', 'owners', 'yr', 'yrs', 'year', 'years'}:
+            continue
+
+        mult = 1.0
+        t = token
+
+        # Handle shorthand scales in tokens (e.g. 78.4k, 1.2l).
+        if t.endswith('lakh'):
+            mult = 100_000.0
+            t = t[:-4]
+        elif t.endswith('lac'):
+            mult = 100_000.0
+            t = t[:-3]
+        elif t.endswith('km'):
+            t = t[:-2]
+
+        if t.endswith('k') and len(t) > 1:
+            mult = 1_000.0
+            t = t[:-1]
+        elif t.endswith('l') and len(t) > 1:
+            mult = 100_000.0
+            t = t[:-1]
+
+        if not t or t in {'-', '.'}:
+            continue
+
+        try:
+            return float(t) * mult
+        except ValueError:
+            continue
+
+    return np.nan
 
 
 def _print_metrics(label: str, actual: pd.Series, pred: pd.Series) -> None:
@@ -214,6 +265,26 @@ def predict_batch(input_path: str, output_path: Optional[str] = None) -> None:
     df = standardize_columns(_read_any(input_path).copy())
     df = _ensure_kms_column(df)
 
+    # Split combined Name column into Make / Model if separate columns are absent.
+    if 'Name' in df.columns and 'Make' not in df.columns:
+        makes, models = _split_name_to_make_model(df['Name'])
+        df['Make'] = makes
+        df['Model'] = models
+
+    # Map short transmission codes to full words.
+    if 'Transmission' in df.columns:
+        df['Transmission'] = df['Transmission'].astype(str).str.strip().map(_TRANSMISSION_MAP).fillna(df['Transmission'])
+
+    # Ensure columns expected downstream exist.
+    for col in ['Make', 'Model', 'Variant', 'Transmission', 'Fuel', 'BodyType', 'City']:
+        if col not in df.columns:
+            df[col] = 'Unknown'
+
+    # Coerce key numeric columns before feature derivation.
+    df['Year'] = df['Year'].apply(_parse_number_no_regex)
+    df['KMs Driven'] = df['KMs Driven'].apply(_parse_number_no_regex)
+    df['Ownership'] = df['Ownership'].apply(_parse_ownership)
+
     # Prefer explicit Reg State; otherwise derive from Registration.
     if 'Reg State' not in df.columns:
         if 'Registration' in df.columns:
@@ -229,7 +300,15 @@ def predict_batch(input_path: str, output_path: Optional[str] = None) -> None:
     # Keep derived features aligned with training logic.
     df['Car Age'] = (CURRENT_YEAR - df['Year']).clip(lower=0)
     df['KMs/Year'] = np.where(df['Car Age'] > 0, df['KMs Driven'] / df['Car Age'], df['KMs Driven'])
-    df['Ownership'] = df['Ownership'].apply(_parse_ownership)
+    df['Log KMs'] = np.log1p(df['KMs Driven'])
+    df['Age x Ownership'] = df['Car Age'] * df['Ownership'].fillna(1)
+    df['KMs x Ownership'] = df['KMs Driven'] * df['Ownership'].fillna(1)
+
+    # Time features – use current date at prediction time
+    now = datetime.now()
+    df['Fetch Month'] = float(now.month)
+    df['Market Days'] = float((now - datetime(2020, 1, 1)).days)
+    df['Days On Market'] = 0.0
 
     X_proc = prepare_model_input(df, meta)
 
