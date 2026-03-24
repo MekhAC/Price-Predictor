@@ -10,4 +10,4 @@ xgboost
 catboost
 optuna
 streamlit
-altair
+altair==4.2.2
