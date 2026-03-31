@@ -23,6 +23,7 @@ def predict(args):
         'Transmission': args.transmission,
         'Fuel': args.fuel,
         'BodyType': args.bodytype,
+        'City': getattr(args, 'city', 'Unknown') or 'Unknown',
         'Year': args.year,
         'KMs Driven': args.kms,
         'Ownership': args.ownership,

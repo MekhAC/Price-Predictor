@@ -77,6 +77,7 @@ def _single_predict(
             'Transmission': transmission,
             'Fuel': fuel,
             'BodyType': bodytype,
+            'City': city,
             'Year': int(year),
             'KMs Driven': float(kms_driven),
             'Ownership': float(ownership),
@@ -463,6 +464,7 @@ with single_tab:
     with c3:
         ownership = st.number_input('Ownership', min_value=1.0, max_value=10.0, value=1.0, step=1.0)
         kms_driven = st.number_input('KMs Driven', min_value=0.0, value=45000.0, step=1000.0)
+        city = str(st.selectbox('City', options=_opts('City')))
         registration = st.text_input('Registration (optional)', value='')
         reg_state = st.text_input('Reg State override (optional, e.g. KA)', value='')
 
@@ -480,6 +482,7 @@ with single_tab:
                 kms_driven=float(kms_driven),
                 registration=registration,
                 reg_state=reg_state,
+                city=city,
             )
 
             m1, m2, m3 = st.columns(3)
