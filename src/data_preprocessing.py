@@ -1,4 +1,5 @@
 # data_preprocessing.py
+r'''
 import os, glob, re
 import numpy as np
 import pandas as pd
@@ -13,10 +14,10 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 
 CURRENT_YEAR = datetime.now().year
 MARKET_EPOCH = datetime(2020, 1, 1)
-PREPROCESSOR_VERSION = 8
+PREPROCESSOR_VERSION = 9
 NUMERIC_FEATURES = ['Year','KMs Driven','Car Age','KMs/Year','Ownership',
                     'Log KMs','Age x Ownership','KMs x Ownership',
-                    'Fetch Month','Market Days','Days On Market']
+                    'Fetch Month','Market Days']
 CATEGORICAL_FEATURES = ['Make','Model','Variant','Transmission','Fuel','BodyType','City','Reg State']
 OTHER_CATEGORY = '__OTHER__'
 
@@ -125,6 +126,93 @@ def _reg_state(x):
     m = re.match(r'([A-Z]{2})', s)
     return m.group(1) if m else 'UNK'
 
+
+def _normalize_text_value(x, default='Unknown'):
+    if pd.isna(x):
+        return default
+    s = re.sub(r'\s+', ' ', str(x).strip())
+    return s if s else default
+
+
+def _normalize_category_key(x) -> str:
+    return re.sub(r'\s+', ' ', str(x).strip()).casefold()
+
+
+def _normalize_fuel_value(x):
+    s = _normalize_text_value(x).upper()
+    fuel_aliases = {
+        'PETROL + CNG': 'PETROL+CNG',
+        'PETROL/CNG': 'PETROL+CNG',
+        'CNG + PETROL': 'PETROL+CNG',
+        'HYBRID ELECTRIC': 'HYBRID',
+        'HYBRID PETROL': 'HYBRID',
+    }
+    return fuel_aliases.get(s, s)
+
+
+def _normalize_bodytype_value(x):
+    s = _normalize_text_value(x).upper()
+    bodytype_map = {
+        'HATCHBACK': 'Hatchback',
+        'SEDAN': 'Sedan',
+        'SUV': 'SUV',
+        'MUV': 'MUV',
+        'CROSSOVER': 'Crossover',
+        'COUPE': 'Coupe',
+        'CONVERTIBLE': 'Convertible',
+        'WAGON': 'Wagon',
+        'VAN': 'Van',
+        'PICKUP': 'Pickup',
+        'PICKUP TRUCK': 'Pickup',
+    }
+    return bodytype_map.get(s, _normalize_text_value(x))
+
+
+def _normalize_city_value(x):
+    s = _normalize_text_value(x)
+    return s.upper() if s != 'Unknown' else s
+
+
+def _normalize_reg_state_value(x):
+    s = _normalize_text_value(x, default='UNK').upper()
+    if s == 'UNKNOWN':
+        return 'UNK'
+    return s[:2] if len(s) >= 2 else 'UNK'
+
+
+def add_model_features(df: pd.DataFrame, reference_datetime: datetime | None = None) -> pd.DataFrame:
+    """
+    Add model features that can be derived from car attributes plus the current
+    or snapshot date. Listing-history-only fields such as days on market are
+    intentionally excluded.
+    """
+    work = df.copy()
+    ref_dt = pd.Timestamp(reference_datetime or datetime.now())
+
+    year = pd.to_numeric(work.get('Year'), errors='coerce')
+    kms = pd.to_numeric(work.get('KMs Driven'), errors='coerce')
+    ownership = pd.to_numeric(work.get('Ownership'), errors='coerce').fillna(1.0)
+
+    if 'Fetched On' in work.columns:
+        fetched_on = pd.to_datetime(work['Fetched On'], errors='coerce')
+    else:
+        fetched_on = pd.Series(pd.NaT, index=work.index, dtype='datetime64[ns]')
+
+    snapshot_year = fetched_on.dt.year.fillna(float(ref_dt.year))
+    car_age = (snapshot_year - year).clip(lower=0)
+    kms_safe = kms.clip(lower=0)
+
+    work['Car Age'] = car_age.astype(float)
+    work['KMs/Year'] = np.where(car_age > 0, kms / car_age, kms)
+    work['Log KMs'] = np.log1p(kms_safe)
+    work['Age x Ownership'] = work['Car Age'] * ownership
+    work['KMs x Ownership'] = kms * ownership
+    work['Fetch Month'] = fetched_on.dt.month.fillna(float(ref_dt.month)).astype(float)
+    market_days = (fetched_on - MARKET_EPOCH).dt.days
+    work['Market Days'] = market_days.fillna(float((ref_dt - MARKET_EPOCH).days)).astype(float)
+
+    return work
+
 # ── CLEANING FUNCTION ──────────────────────────────────────────────────────────
 def load_and_clean(path):
     # Auto-cache xlsx → parquet for fast reloads
@@ -156,11 +244,8 @@ def load_and_clean(path):
         df['Transmission'] = df['Transmission'].astype(str).str.strip().map(_TRANSMISSION_MAP).fillna(df['Transmission'])
 
     # Normalize BodyType casing (HATCHBACK → Hatchback, SUV stays SUV via explicit map).
-    _BT_MAP = {'HATCHBACK': 'Hatchback', 'SEDAN': 'Sedan', 'SUV': 'SUV', 'MUV': 'MUV',
-               'CROSSOVER': 'Crossover', 'COUPE': 'Coupe', 'CONVERTIBLE': 'Convertible',
-               'WAGON': 'Wagon', 'VAN': 'Van', 'PICKUP': 'Pickup'}
     if 'BodyType' in df.columns:
-        df['BodyType'] = df['BodyType'].astype(str).str.strip().str.upper().map(_BT_MAP).fillna(df['BodyType'])
+        df['BodyType'] = df['BodyType'].map(_normalize_bodytype_value)
 
     # Ensure key columns exist (create empty if missing)
     for must in ['KMs Driven','Year','Ownership','Price (₹)']:
@@ -317,16 +402,41 @@ def build_preprocessor(df):
     print(f"✅ Preprocessor saved to {out_path}")
     return meta
 
-# ── SCRIPT ENTRYPOINT ───────────────────────────────────────────────────────────
-if __name__ == "__main__":
+'''
+
+import glob
+import os
+
+import pandas as pd
+
+from model_preprocessing import *  # noqa: F401,F403,E402
+from model_preprocessing import DATA_DIR, build_preprocessor, load_and_clean, keep_first_snapshot_per_listing
+
+
+def main() -> None:
     files = (
-        glob.glob(os.path.join(DATA_DIR, 'normalized_table_*.*')) +
-        glob.glob(os.path.join(DATA_DIR, 'Cars24_*.*')) +
-        glob.glob(os.path.join(DATA_DIR, 'Spinny_*.*'))
+        glob.glob(os.path.join(DATA_DIR, 'normalized_table.*'))
+        + glob.glob(os.path.join(DATA_DIR, 'normalized_table_*.*'))
+        + glob.glob(os.path.join(DATA_DIR, 'Cars24_*.*'))
+        + glob.glob(os.path.join(DATA_DIR, 'Spinny_*.*'))
     )
+    files = [
+        path
+        for path in files
+        if not (path.lower().endswith('.parquet') and os.path.exists(path.rsplit('.', 1)[0] + '.xlsx'))
+    ]
     if not files:
         raise RuntimeError(f"No data files found in {DATA_DIR}")
 
-    print(f"🔍 Loading {len(files)} files...")
-    df = pd.concat([load_and_clean(f) for f in files], ignore_index=True)
+    print(f"Loading {len(files)} files...")
+    df = pd.concat([load_and_clean(path) for path in files], ignore_index=True)
+    original_rows = len(df)
+    df = keep_first_snapshot_per_listing(df)
+    removed_rows = original_rows - len(df)
+    if removed_rows > 0:
+        print(f"Using earliest snapshot per listing: kept {len(df):,} rows, removed {removed_rows:,} repeats")
     build_preprocessor(df)
+
+
+if __name__ == "__main__":
+    main()

@@ -7,7 +7,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 from data_preprocessing import standardize_columns
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data'))
-files = glob.glob(os.path.join(DATA_DIR, 'normalized_table_*.*'))
+files = (
+    glob.glob(os.path.join(DATA_DIR, 'normalized_table.*'))
+    + glob.glob(os.path.join(DATA_DIR, 'normalized_table_*.*'))
+)
 
 # Read just the first file to keep it fast
 print(f"Reading {os.path.basename(files[0])} (1 of {len(files)})...")

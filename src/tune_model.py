@@ -13,7 +13,8 @@ from sklearn.metrics import mean_absolute_percentage_error
 from sklearn.model_selection import KFold
 
 sys.path.insert(0, os.path.dirname(__file__))
-from data_preprocessing import load_and_clean, build_preprocessor, prepare_model_input, is_native_lightgbm_preprocessor
+from data_preprocessing import load_and_clean, build_preprocessor, prepare_model_input, keep_first_snapshot_per_listing
+from market_dynamics import DYNAMICS_FEATURES, build_listing_dynamics_targets, build_market_dynamics_features
 
 BASE_DIR   = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 DATA_DIR   = os.path.join(BASE_DIR, 'data')
@@ -25,6 +26,7 @@ SAMPLE_SIZE = 300_000  # subsample for tuning speed; final train uses all data
 
 # ── Load data ──────────────────────────────────────────────────────────────────
 files = (
+    glob.glob(os.path.join(DATA_DIR, 'normalized_table.*')) +
     glob.glob(os.path.join(DATA_DIR, 'normalized_table_*.*')) +
     glob.glob(os.path.join(DATA_DIR, 'Cars24_*.*')) +
     glob.glob(os.path.join(DATA_DIR, 'Spinny_*.*'))
@@ -35,17 +37,34 @@ if not files:
     raise RuntimeError(f"No data files found in {DATA_DIR}")
 
 print(f"Loading {len(files)} files...")
-df = pd.concat([load_and_clean(f) for f in files], ignore_index=True)
+snapshot_df = pd.concat([load_and_clean(f) for f in files], ignore_index=True)
+original_rows = len(snapshot_df)
+df = keep_first_snapshot_per_listing(snapshot_df)
+removed_rows = original_rows - len(df)
+if removed_rows > 0:
+    print(f"Using earliest snapshot per listing: kept {len(df):,} rows, removed {removed_rows:,} repeats")
+
+dynamics_targets = build_listing_dynamics_targets(snapshot_df)
+target_df = pd.DataFrame(index=df.index, columns=DYNAMICS_FEATURES, dtype=float)
+if 'ID' in df.columns and not dynamics_targets.empty:
+    target_df = df[['ID']].copy()
+    target_df['_row_order'] = np.arange(len(target_df))
+    target_df['ID'] = target_df['ID'].astype('string').str.strip()
+    target_df = (
+        target_df.merge(dynamics_targets, on='ID', how='left')
+        .sort_values('_row_order', kind='mergesort')
+        .drop(columns=['ID', '_row_order'], errors='ignore')
+        .reset_index(drop=True)
+    )
+
+dynamics_features, _ = build_market_dynamics_features(df, target_df, np.arange(len(df)))
+df = df.copy()
+for column in DYNAMICS_FEATURES:
+    df[column] = dynamics_features[column]
 
 pre_path = os.path.join(MODELS_DIR, 'preprocessor.joblib')
-if os.path.exists(pre_path):
-    meta = joblib.load(pre_path)
-    if not is_native_lightgbm_preprocessor(meta):
-        build_preprocessor(df)
-        meta = joblib.load(pre_path)
-else:
-    build_preprocessor(df)
-    meta = joblib.load(pre_path)
+build_preprocessor(df)
+meta = joblib.load(pre_path)
 
 FEATURES = meta['numeric_feats'] + meta['categorical_feats']
 X_full = prepare_model_input(df[FEATURES], meta)

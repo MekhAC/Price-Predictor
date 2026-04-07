@@ -7,6 +7,7 @@ import glob
 
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data'))
 files = (
+    glob.glob(os.path.join(DATA_DIR, 'normalized_table.*')) +
     glob.glob(os.path.join(DATA_DIR, 'normalized_table_*.*')) +
     glob.glob(os.path.join(DATA_DIR, 'Cars24_*.*')) +
     glob.glob(os.path.join(DATA_DIR, 'Spinny_*.*'))

@@ -39,6 +39,7 @@ def write_csv(path: str, rows: pd.DataFrame):
 
 def main(include_unknown: bool, only: str):
     files = (
+        glob.glob(os.path.join(DATA_DIR, 'normalized_table.*')) +
         glob.glob(os.path.join(DATA_DIR, 'normalized_table_*.*')) +
         glob.glob(os.path.join(DATA_DIR, 'Cars24_*.*')) +
         glob.glob(os.path.join(DATA_DIR, 'Spinny_*.*'))

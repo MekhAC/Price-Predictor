@@ -7,6 +7,8 @@ rottoenv/
 # Python cache
 __pycache__/
 **/__pycache__/
+*.pyc
+*.pyc.*
 
 # Joblib model files
 *.joblib
@@ -14,6 +16,18 @@ __pycache__/
 
 # Prediction input/output files directory
 /predictions/
+
+# CatBoost training artifacts
+/catboost_info/
+/src/catboost_info/
+
+# Generated model reports and ad hoc batch outputs
+/feature_importance_current.csv
+/last_2weeks_*.csv
+/normalized_table_part4_baseline_vs_dynamics_predictions.csv
+/tmp_*.csv
+/models/*_cv_metrics.csv
+/models/*_feature_importance.csv
 
 
 # Common Python virtual environments

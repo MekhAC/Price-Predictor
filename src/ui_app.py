@@ -5,14 +5,12 @@ import tempfile
 from contextlib import redirect_stdout
 from datetime import datetime
 
-import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 from batch_predict import predict_batch
-from data_preprocessing import is_native_lightgbm_preprocessor, prepare_model_input
-from demand_adjuster import DemandAdjuster
+from primary_model_runtime import build_option_map, load_primary_artifacts, predict_primary_rows
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 MODELS_DIR = os.path.join(BASE_DIR, 'models')
@@ -26,15 +24,8 @@ def _read_any(path: str) -> pd.DataFrame:
 
 @st.cache_resource
 def _load_artifacts():
-    meta = joblib.load(os.path.join(MODELS_DIR, 'preprocessor.joblib'))
-    if not is_native_lightgbm_preprocessor(meta):
-        raise RuntimeError(
-            'preprocessor.joblib is from the old OHE pipeline. Re-run src/train_model.py once to rebuild artifacts.'
-        )
-
-    model = joblib.load(os.path.join(MODELS_DIR, 'price_model.joblib'))
-    adjuster = DemandAdjuster()
-    return meta, model, adjuster
+    artifacts = load_primary_artifacts()
+    return artifacts, build_option_map(artifacts['meta'])
 
 
 def _resolve_reg_state(reg_state: str, registration: str) -> str:
@@ -62,13 +53,9 @@ def _single_predict(
     reg_state: str,
     city: str = 'Unknown',
 ):
-    meta, model, adjuster = _load_artifacts()
+    artifacts, _ = _load_artifacts()
 
     resolved_state = _resolve_reg_state(reg_state, registration)
-    current_year = datetime.now().year
-    car_age = max(current_year - int(year), 0)
-    kms_per_year = float(kms_driven) / car_age if car_age > 0 else float(kms_driven)
-
     row = pd.DataFrame([
         {
             'Make': make,
@@ -81,56 +68,31 @@ def _single_predict(
             'Year': int(year),
             'KMs Driven': float(kms_driven),
             'Ownership': float(ownership),
+            'Registration': registration,
             'Reg State': resolved_state,
-            'Car Age': float(car_age),
-            'KMs/Year': float(kms_per_year),
-            'Log KMs': float(np.log1p(kms_driven)),
-            'Age x Ownership': float(car_age * ownership),
-            'KMs x Ownership': float(kms_driven * ownership),
-            'Fetch Month': float(datetime.now().month),
-            'Market Days': float((datetime.now() - datetime(2020, 1, 1)).days),
-            'Days On Market': 0.0,
         }
     ])
 
-    X_proc = prepare_model_input(row, meta)
-    base_price = float(model.predict(X_proc)[0])
+    transformed, pred = predict_primary_rows(row, artifacts)
+    if transformed.empty or len(pred) == 0:
+        raise RuntimeError('No valid rows available for primary-model prediction.')
 
-    make_value = str(row.at[0, 'Make'])
-    model_value = str(row.at[0, 'Model'])
-    variant_value = str(row.at[0, 'Variant'])
-    city_value = city
-    bodytype_value = str(row.at[0, 'BodyType'])
-    fuel_value = str(row.at[0, 'Fuel'])
-    transmission_value = str(row.at[0, 'Transmission'])
-    car_age_value = float(car_age)
-    kms_per_year_value = float(kms_per_year)
-    ownership_value = float(ownership)
-    reg_state_value = None if resolved_state == 'UNK' else resolved_state
-
-    composite, breakdown = adjuster.compute(
-        make=make_value,
-        model=model_value,
-        variant=variant_value,
-        city=city_value,
-        bodytype=bodytype_value,
-        fuel=fuel_value,
-        transmission=transmission_value,
-        car_age=car_age_value,
-        kms_per_year=kms_per_year_value,
-        ownership=ownership_value,
-        reg_state=reg_state_value,
-    )
-
-    adjusted_price = base_price * composite
+    predicted_price = float(pred[0])
+    feature_snapshot = {
+        'Car Age': float(transformed.iloc[0].get('Car Age', 0.0)),
+        'KMs/Year': float(transformed.iloc[0].get('KMs/Year', 0.0)),
+        'Expected Avg Drop 7d': float(transformed.iloc[0].get('Expected Avg Drop 7d', 0.0)),
+        'Expected Avg Drop 30d': float(transformed.iloc[0].get('Expected Avg Drop 30d', 0.0)),
+        'Expected Price Drop Rate': float(transformed.iloc[0].get('Expected Price Drop Rate', 0.0)),
+        'Expected Time To First Drop': float(transformed.iloc[0].get('Expected Time To First Drop', 0.0)),
+        'Expected Time To Sell': float(transformed.iloc[0].get('Expected Time To Sell', 0.0)),
+        'Expected Price Volatility': float(transformed.iloc[0].get('Expected Price Volatility', 0.0)),
+        'Expected Market Liquidity Score': float(transformed.iloc[0].get('Expected Market Liquidity Score', 0.0)),
+    }
 
     return {
-        'base_price': base_price,
-        'adjusted_price': adjusted_price,
-        'composite_multiplier': composite,
-        'car_age': car_age,
-        'kms_per_year': kms_per_year,
-        'breakdown': breakdown,
+        'predicted_price': predicted_price,
+        'feature_snapshot': feature_snapshot,
     }
 
 
@@ -169,13 +131,73 @@ def _run_batch(uploaded_file):
 
 
 def _extract_batch_metrics(logs: str) -> pd.DataFrame:
+    normalized_logs = logs.replace('\r\n', '\n').replace('\r', '\n')
+    header_pattern = re.compile(r"^---\s*(?P<title>[A-Za-z].+?)\s*---\s*$", flags=re.MULTILINE)
+    headers = list(header_pattern.finditer(normalized_logs))
+    parsed_rows = []
+
+    for idx, match in enumerate(headers):
+        title = match.group('title').strip()
+        body_start = match.end()
+        body_end = headers[idx + 1].start() if idx + 1 < len(headers) else len(normalized_logs)
+        body = normalized_logs[body_start:body_end]
+
+        line_values = {}
+        for raw_line in body.splitlines():
+            line = raw_line.strip()
+            if ':' not in line:
+                continue
+            key, value = [part.strip() for part in line.split(':', 1)]
+            line_values[key] = value
+
+        if not {'Rows', 'MSE', 'RMSE', 'MAPE'}.issubset(line_values):
+            continue
+
+        r2_value = None
+        for r2_key in ('R2', 'R²', 'RÂ²', 'RÃ‚Â²'):
+            if r2_key in line_values:
+                r2_value = line_values[r2_key]
+                break
+        if r2_value is None:
+            continue
+
+        row = {
+            'Label': title,
+            'Rows': int(line_values['Rows'].replace(',', '')),
+            'MSE': float(line_values['MSE'].replace(',', '')),
+            'RMSE': float(line_values['RMSE'].replace(',', '')),
+            'R-square': float(r2_value),
+            'MAPE (%)': float(line_values['MAPE'].replace('%', '')),
+        }
+        if 'MAE' in line_values:
+            row['MAE'] = float(line_values['MAE'].replace(',', ''))
+        if 'Median AE' in line_values:
+            row['Median AE'] = float(line_values['Median AE'].replace(',', ''))
+        if 'MPE' in line_values:
+            row['MPE (%)'] = float(line_values['MPE'].replace('%', ''))
+        parsed_rows.append(row)
+
+    parsed_df = pd.DataFrame(parsed_rows)
+    if not parsed_df.empty:
+        parsed_df = parsed_df.drop_duplicates(subset=['Label'], keep='last').copy()
+        order = {
+            'Primary Model Prediction': 0,
+            'Leakage-Safe Prediction': 0,
+            'Leakage-Safe Summary': 1,
+            'Base Prediction': 2,
+            'Adjusted Prediction': 3,
+        }
+        parsed_df['_order'] = parsed_df['Label'].map(order).fillna(999).astype(int)
+        parsed_df = parsed_df.sort_values('_order').drop(columns=['_order']).reset_index(drop=True)
+        return parsed_df
+
     # Parse the metrics already printed by src/batch_predict.py into a table for UI display.
     pattern = re.compile(
         r"---\s*(?P<label>.+?)\s*---\s*"
         r"Rows\s*:\s*(?P<rows>[\d,]+)\s*"
         r"MSE\s*:\s*(?P<mse>[\d,\.]+)\s*"
         r"RMSE\s*:\s*(?P<rmse>[\d,\.]+)\s*"
-        r"(?:R²|R2)\s*:\s*(?P<r2>[\-\d\.]+)\s*"
+        r"(?:R²|R2)\s*:\s*(?P<r2>[\-\d\.]+|nan)\s*"
         r"MAPE\s*:\s*(?P<mape>[\d\.]+)%",
         flags=re.MULTILINE,
     )
@@ -201,7 +223,7 @@ def _extract_batch_metrics(logs: str) -> pd.DataFrame:
     df = df.drop_duplicates(subset=['Label'], keep='last').copy()
 
     # Keep a stable, user-friendly order when both are present.
-    order = {'Base Prediction': 0, 'Adjusted Prediction': 1}
+    order = {'Primary Model Prediction': 0, 'Base Prediction': 1, 'Adjusted Prediction': 2}
     df['_order'] = df['Label'].map(order).fillna(999).astype(int)
     df = df.sort_values('_order').drop(columns=['_order']).reset_index(drop=True)
     return df
@@ -286,6 +308,47 @@ def _parse_segment_section_to_df(title: str, body: str) -> pd.DataFrame:
 
 
 def _build_segment_tables_from_output(output_df: pd.DataFrame):
+    actual_col = None
+    for column in ['Target Price', 'Price (₹)', 'Price (â‚¹)', 'Price (Ã¢â€šÂ¹)', 'Price (?)']:
+        if column in output_df.columns:
+            actual_col = column
+            break
+
+    if actual_col is not None and 'Predicted Price' in output_df.columns and 'Base Predicted Price' not in output_df.columns:
+        work = output_df.copy()
+        work['actual'] = pd.to_numeric(work[actual_col], errors='coerce')
+        work['pred'] = pd.to_numeric(work['Predicted Price'], errors='coerce')
+        work['Make'] = work.get('Make', 'Unknown').fillna('Unknown').astype(str)
+        valid = work['actual'].notna() & work['pred'].notna() & (work['actual'] != 0)
+        if not valid.any():
+            return []
+
+        bins = [-np.inf, 300000, 700000, 1200000, 2000000, np.inf]
+        names = ['<=3L', '3-7L', '7-12L', '12-20L', '>20L']
+        d = work.loc[valid, ['Make', 'actual', 'pred']].copy()
+        d['ape'] = ((d['pred'] - d['actual']).abs() / d['actual']) * 100
+        d['mpe'] = ((d['pred'] - d['actual']) / d['actual']) * 100
+        d['price_band'] = pd.cut(d['actual'], bins=bins, labels=names)
+
+        band_df = d.groupby('price_band', observed=True).agg(
+            **{'MAPE (%)': ('ape', 'mean'), 'MPE (%)': ('mpe', 'mean')}
+        ).reset_index(names='Segment')
+        band_df['Direction'] = band_df['MPE (%)'].apply(
+            lambda x: 'POSITIVE(over)' if x > 0 else ('NEGATIVE(under)' if x < 0 else 'NEUTRAL')
+        )
+
+        top_makes = d['Make'].value_counts().head(10).index
+        make_df = d[d['Make'].isin(top_makes)].groupby('Make').agg(
+            **{'MAPE (%)': ('ape', 'mean'), 'MPE (%)': ('mpe', 'mean')}
+        ).sort_values(by='MAPE (%)').reset_index(names='Segment')
+        make_df['Direction'] = make_df['MPE (%)'].apply(
+            lambda x: 'POSITIVE(over)' if x > 0 else ('NEGATIVE(under)' if x < 0 else 'NEUTRAL')
+        )
+
+        return [
+            {'title': 'Segment Error Summary (Primary) by Price Band', 'df': band_df},
+            {'title': 'Segment Error Summary (Primary) by Top Makes', 'df': make_df},
+        ]
     required_cols = {'Price (₹)', 'Base Predicted Price', 'Predicted Price'}
     if not required_cols.issubset(set(output_df.columns)):
         return []
@@ -441,12 +504,10 @@ single_tab, batch_tab = st.tabs(['Single Prediction', 'Batch Prediction'])
 with single_tab:
     st.subheader('Predict One Car')
 
-    # Load category options from the trained preprocessor so dropdowns are data-driven.
-    _meta, _, _ = _load_artifacts()
-    _cat_levels = _meta['categorical_levels']
+    bundle, _option_map = _load_artifacts()
 
     def _opts(col, exclude_other=True):
-        vals = _cat_levels.get(col, [])
+        vals = _option_map.get(col, [])
         if exclude_other:
             vals = [v for v in vals if v != '__OTHER__']
         return vals
@@ -486,18 +547,23 @@ with single_tab:
             )
 
             m1, m2, m3 = st.columns(3)
-            m1.metric('Base Price', f"INR {result['base_price']:,.0f}")
-            m2.metric('Demand Adjusted Price', f"INR {result['adjusted_price']:,.0f}")
-            m3.metric('Demand Multiplier', f"{result['composite_multiplier']:.3f}x")
+            m1.metric('Predicted Price', f"INR {result['predicted_price']:,.0f}")
+            m2.metric('Expected Time To Sell', f"{result['feature_snapshot']['Expected Time To Sell']:.1f} days")
+            m3.metric('Liquidity Score', f"{result['feature_snapshot']['Expected Market Liquidity Score']:.1f}")
 
             st.write(
-                f"Derived Car Age: {result['car_age']} years | Derived KMs/Year: {result['kms_per_year']:,.0f}"
+                f"Derived Car Age: {result['feature_snapshot']['Car Age']:.1f} years | "
+                f"Derived KMs/Year: {result['feature_snapshot']['KMs/Year']:,.0f} | "
+                f"Expected Avg Drop 30d: {result['feature_snapshot']['Expected Avg Drop 30d']:.4f}"
             )
 
-            breakdown_df = pd.DataFrame(
-                result['breakdown'], columns=['Component', 'Multiplier', 'Weight']
+            feature_df = pd.DataFrame(
+                [
+                    {'Feature': key, 'Value': value}
+                    for key, value in result['feature_snapshot'].items()
+                ]
             )
-            st.dataframe(breakdown_df, width='stretch')
+            st.dataframe(feature_df, width='stretch')
         except Exception as e:
             st.error(f'Single prediction failed: {e}')
 
